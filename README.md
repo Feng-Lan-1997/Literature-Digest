@@ -7,7 +7,8 @@
 - GitHub Actions 每 30 分钟唤醒一次。
 - 脚本按 `TIME_ZONE` 和 `PUSH_TIME` 判断是否到了当天推送时间。
 - 当天已推送过则跳过。
-- 到点后检索 Crossref、OpenAlex、PubMed、Europe PMC、arXiv。
+- 到点后按 `SEARCH_ROUTE_NAME` 指定的路径检索数据库。
+- 可按 `SEARCH_ROUTE_NAME` 切换检索路径，例如 AI 方法优先、医学验证优先、牙种植专题或工程螺钉规划。
 - 排除已推送过的 DOI/标题。
 - 可要求文献同时命中多组关键词，例如“手术相关”和“agent 相关”。
 - 可优先推送指定期刊，例如 `npj Digital Medicine`、`Nature` 及 Nature 子刊。
@@ -53,12 +54,20 @@ LOOKBACK_DAYS=90
 MAX_ITEMS=3
 EXCLUDE_PUSHED=true
 AUTO_JOURNAL_METRICS=true
+SEARCH_ROUTE_NAME=dental_implant_specific
+SEARCH_ROUTES={"ai_method_first":["arXiv","Semantic Scholar","Google Scholar","IEEE Xplore","ACM DL"],"medical_validation_first":["PubMed","Embase","Web of Science","Scopus","Cochrane Library"],"dental_implant_specific":["PubMed","Google Scholar","Scopus","Web of Science","ScienceDirect","SpringerLink"],"engineering_screw_planning":["IEEE Xplore","PubMed","ScienceDirect","SpringerLink","Web of Science"]}
 REQUIRED_KEYWORD_GROUPS=surgery|surgical|operative|operation|procedure|intervention|intraoperative|perioperative|operating room|surgeon;agent|agents|agentic|AI agent|LLM agent|autonomous agent|multi-agent|multiagent|large language model|LLM
 STRICT_REQUIRED_KEYWORDS=true
 PRIORITY_JOURNALS=npj Digital Medicine,Nature
 ```
 
 `OPENALEX_API_KEY` 可选。OpenAlex API Key 免费，可提高 OpenAlex 请求额度。
+
+`SEMANTIC_SCHOLAR_API_KEY` 可选。Semantic Scholar 不填也能用，填写后请求额度更稳定。
+
+`SEARCH_ROUTE_NAME` 可选值：`ai_method_first`、`medical_validation_first`、`dental_implant_specific`、`engineering_screw_planning`。
+
+当前可直接自动检索的来源包括 `arXiv`、`Semantic Scholar`、`PubMed`、`Crossref`、`OpenAlex`、`Europe PMC`。其他需要机构 API 或不适合 GitHub Actions 自动访问的数据库会记录为 skipped。
 
 `IMPACT_FACTOR_TABLE` 可选，用于手动覆盖期刊指标，每行一个期刊：
 
