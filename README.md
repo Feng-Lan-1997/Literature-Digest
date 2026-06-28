@@ -9,7 +9,9 @@
 - 当天已推送过则跳过。
 - 到点后检索 Crossref、OpenAlex、PubMed、Europe PMC、arXiv。
 - 排除已推送过的 DOI/标题。
-- 按关键词相关度优先排序，相关度接近时按期刊指标从高到低排序。
+- 可要求文献同时命中多组关键词，例如“手术相关”和“agent 相关”。
+- 可优先推送指定期刊，例如 `npj Digital Medicine`、`Nature` 及 Nature 子刊。
+- 按优先期刊、关键词相关度和期刊指标从高到低排序。
 - 推送成功后，把已推送历史保存到 GitHub Actions cache。
 
 ## 必填配置
@@ -51,6 +53,9 @@ LOOKBACK_DAYS=90
 MAX_ITEMS=3
 EXCLUDE_PUSHED=true
 AUTO_JOURNAL_METRICS=true
+REQUIRED_KEYWORD_GROUPS=surgery|surgical|operative|operation|procedure|intervention|intraoperative|perioperative|operating room|surgeon;agent|agents|agentic|AI agent|LLM agent|autonomous agent|multi-agent|multiagent|large language model|LLM
+STRICT_REQUIRED_KEYWORDS=true
+PRIORITY_JOURNALS=npj Digital Medicine,Nature
 ```
 
 `OPENALEX_API_KEY` 可选。OpenAlex API Key 免费，可提高 OpenAlex 请求额度。
