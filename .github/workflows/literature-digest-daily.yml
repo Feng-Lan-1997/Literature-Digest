@@ -53,4 +53,9 @@ jobs:
           AUTO_JOURNAL_METRICS: ${{ vars.AUTO_JOURNAL_METRICS || 'true' }}
           FORCE_PUSH: ${{ github.event_name == 'workflow_dispatch' && inputs.force && 'true' || 'false' }}
 
-      - name: Save pus
+      - name: Save pushed history
+        if: steps.push.outputs.did_push == 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: .literature-digest-state
+          key: literature-digest-state-${{ github.run_id }}
