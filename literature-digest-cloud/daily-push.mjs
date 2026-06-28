@@ -8,7 +8,10 @@ const DEFAULTS = {
   pushTime: "08:30",
   timeZone: "America/New_York",
   excludePushed: true,
-  autoJournalMetrics: true
+  autoJournalMetrics: true,
+  requiredKeywordGroups:
+    "surgery|surgical|operative|operation|procedure|intervention|intraoperative|perioperative|operating room|surgeon;agent|agents|agentic|AI agent|LLM agent|autonomous agent|multi-agent|multiagent|large language model|LLM",
+  priorityJournals: "npj Digital Medicine,Nature"
 };
 
 async function main() {
@@ -22,7 +25,7 @@ async function main() {
     return;
   }
 
-  console.log(`Searching literature for: ${config.researchQuery}`);
+  console.log(`Searching literature for: ${config.searchQuery}`);
   const result = await fetchWebRecommendations(config, state.pushedHistory || []);
   const batch = {
     generatedAt: new Date().toISOString(),
@@ -46,6 +49,10 @@ async function main() {
 function readConfig() {
   const researchQuery = cleanText(process.env.RESEARCH_QUERY);
   const weComWebhookUrl = cleanText(process.env.WECOM_WEBHOOK_URL);
+  const requiredKeywordGroups = parseRequiredKeywordGroups(
+    process.env.REQUIRED_KEYWORD_GROUPS || DEFAULTS.requiredKeywordGroups
+  );
+  const priorityJournalTerms = parsePriorityJournalTerms(process.env.PRIORITY_JOURNALS || DEFAULTS.priorityJournals);
 
   if (!researchQuery) {
     throw new Error("Missing RESEARCH_QUERY.");
@@ -59,6 +66,7 @@ function readConfig() {
 
   return {
     researchQuery,
+    searchQuery: buildSearchQuery(researchQuery, requiredKeywordGroups),
     weComWebhookUrl,
     lookbackDays: numberFromEnv("LOOKBACK_DAYS", DEFAULTS.lookbackDays),
     maxItems: numberFromEnv("MAX_ITEMS", DEFAULTS.maxItems),
@@ -69,7 +77,10 @@ function readConfig() {
     autoJournalMetrics: process.env.AUTO_JOURNAL_METRICS !== "false",
     impactFactorTable: String(process.env.IMPACT_FACTOR_TABLE || "").trim(),
     forcePush: process.env.FORCE_PUSH === "true",
-    openAlexApiKey: cleanText(process.env.OPENALEX_API_KEY)
+    openAlexApiKey: cleanText(process.env.OPENALEX_API_KEY),
+    requiredKeywordGroups,
+    strictRequiredKeywords: process.env.STRICT_REQUIRED_KEYWORDS !== "false",
+    priorityJournalTerms
   };
 }
 
@@ -115,7 +126,7 @@ function shouldRunNow(config, state) {
 }
 
 async function fetchWebRecommendations(config, pushedHistory) {
-  const tokens = keywordTokens(config.researchQuery);
+  const tokens = rankingTokens(config);
   const pushedKeys = new Set(config.excludePushed ? pushedHistory.map((entry) => entry.key).filter(Boolean) : []);
   const manualImpactFactors = parseImpactFactorTable(config.impactFactorTable);
   const sourceResults = await Promise.all([
@@ -129,8 +140,11 @@ async function fetchWebRecommendations(config, pushedHistory) {
   const allItems = sourceResults.flatMap((result) => result.items);
   const merged = mergeRecommendations(allItems);
   const enriched = await enrichJournalMetrics(merged, manualImpactFactors, config);
-  const items = enriched
+  const candidates = enriched
+    .map((item) => addRankingSignals(item, config))
     .filter((item) => !pushedKeys.has(recommendationKey(item)))
+    .filter((item) => !config.strictRequiredKeywords || matchesRequiredKeywordGroups(item, config.requiredKeywordGroups));
+  const items = candidates
     .sort(sortRecommendations)
     .slice(0, config.maxItems);
 
@@ -160,7 +174,7 @@ async function fetchSource(label, task) {
 async function fetchCrossrefRecommendations(config, tokens) {
   const fromDate = formatDate(daysAgo(config.lookbackDays));
   const params = new URLSearchParams({
-    "query.bibliographic": config.researchQuery,
+    "query.bibliographic": config.searchQuery,
     filter: `from-pub-date:${fromDate},type:journal-article`,
     sort: "published",
     order: "desc",
@@ -189,6 +203,7 @@ function normalizeCrossrefItem(item, query, tokens) {
     publicationDate,
     citationCount,
     fullTextLink,
+    abstract,
     highlight,
     sourceUrl: fullTextLink,
     source: "Crossref",
@@ -199,7 +214,7 @@ function normalizeCrossrefItem(item, query, tokens) {
 async function fetchOpenAlexRecommendations(config, tokens) {
   const fromDate = formatDate(daysAgo(config.lookbackDays));
   const params = new URLSearchParams({
-    search: config.researchQuery,
+    search: config.searchQuery,
     filter: `from_publication_date:${fromDate},type:article`,
     sort: "publication_date:desc",
     "per-page": "80"
@@ -234,6 +249,7 @@ function normalizeOpenAlexItem(item, query, tokens) {
     publicationDate,
     citationCount,
     fullTextLink,
+    abstract,
     highlight,
     sourceUrl: fullTextLink,
     source: "OpenAlex",
@@ -246,7 +262,7 @@ function normalizeOpenAlexItem(item, query, tokens) {
 async function fetchPubMedRecommendations(config, tokens) {
   const fromDate = formatPubMedDate(daysAgo(config.lookbackDays));
   const toDate = formatPubMedDate(new Date());
-  const term = `${config.researchQuery} AND ("${fromDate}"[Date - Publication] : "${toDate}"[Date - Publication])`;
+  const term = `${config.searchQuery} AND ("${fromDate}"[Date - Publication] : "${toDate}"[Date - Publication])`;
   const searchParams = new URLSearchParams({
     db: "pubmed",
     term,
@@ -286,6 +302,7 @@ function normalizePubMedItem(item, query, tokens) {
     publicationDate,
     citationCount: "",
     fullTextLink,
+    abstract: "",
     highlight,
     sourceUrl: fullTextLink,
     source: "PubMed",
@@ -297,7 +314,7 @@ async function fetchEuropePmcRecommendations(config, tokens) {
   const fromDate = formatDate(daysAgo(config.lookbackDays));
   const toDate = formatDate(new Date());
   const params = new URLSearchParams({
-    query: `(${config.researchQuery}) FIRST_PDATE:[${fromDate} TO ${toDate}]`,
+    query: `(${config.searchQuery}) FIRST_PDATE:[${fromDate} TO ${toDate}]`,
     format: "json",
     resulttype: "core",
     pageSize: "80",
@@ -331,6 +348,7 @@ function normalizeEuropePmcItem(item, query, tokens) {
     publicationDate,
     citationCount,
     fullTextLink,
+    abstract,
     highlight,
     sourceUrl: fullTextLink,
     source: "Europe PMC",
@@ -341,7 +359,7 @@ function normalizeEuropePmcItem(item, query, tokens) {
 async function fetchArxivRecommendations(config, tokens) {
   const fromDate = formatArxivDate(daysAgo(config.lookbackDays));
   const toDate = formatArxivDate(new Date());
-  const searchQuery = `${buildArxivTextQuery(config.researchQuery)} AND submittedDate:[${fromDate}0000 TO ${toDate}2359]`;
+  const searchQuery = `${buildArxivTextQuery(config.searchQuery)} AND submittedDate:[${fromDate}0000 TO ${toDate}2359]`;
   const params = new URLSearchParams({
     search_query: searchQuery,
     start: "0",
@@ -372,6 +390,7 @@ function normalizeArxivItem(item, query, tokens) {
     publicationDate,
     citationCount: "",
     fullTextLink,
+    abstract,
     highlight,
     sourceUrl: item.url || fullTextLink,
     source: "arXiv",
@@ -480,6 +499,7 @@ function mergeRecommendation(current, incoming) {
     citationCount,
     fullTextLink: current.fullTextLink || incoming.fullTextLink,
     sourceUrl: current.sourceUrl || incoming.sourceUrl,
+    abstract: longerText(current.abstract, incoming.abstract),
     highlight: longerText(current.highlight, incoming.highlight),
     source,
     openAlexSourceId: current.openAlexSourceId || incoming.openAlexSourceId || "",
@@ -511,6 +531,8 @@ function mergePushedHistory(history, items) {
 }
 
 function sortRecommendations(a, b) {
+  const priorityDiff = journalPrioritySortValue(b) - journalPrioritySortValue(a);
+  if (priorityDiff !== 0) return priorityDiff;
   const relevanceDiff = b.relevanceScore - a.relevanceScore;
   if (Math.abs(relevanceDiff) > 1.5) return relevanceDiff;
   const impactDiff = impactFactorSortValue(b) - impactFactorSortValue(a);
@@ -554,6 +576,7 @@ function buildWeComMarkdown(config, batch) {
       : "";
     const meta = [
       item.journal,
+      item.journalPriority ? "Priority journal" : "",
       item.publicationDate,
       item.source ? `来源：${item.source}` : "",
       metric,
@@ -585,6 +608,56 @@ function makeHighlight(item, query) {
   const parts = [intro];
   if (item.citationCount) parts.push(`${item.source || "来源"} 引用/参考计数：${item.citationCount}。`);
   return cleanText(parts.join(" "));
+}
+
+function rankingTokens(config) {
+  const terms = [config.searchQuery, ...config.requiredKeywordGroups.flat()].join(" ");
+  return [...new Set(keywordTokens(terms))];
+}
+
+function addRankingSignals(item, config) {
+  return {
+    ...item,
+    journalPriority: journalPriorityScore(item.journal, config.priorityJournalTerms)
+  };
+}
+
+function matchesRequiredKeywordGroups(item, groups) {
+  if (!groups.length) return true;
+  const text = itemTextForMatching(item);
+  return groups.every((group) => group.some((term) => textMatchesTerm(text, term)));
+}
+
+function itemTextForMatching(item) {
+  return [item.title, item.journal, item.abstract].map(cleanText).filter(Boolean).join(" ");
+}
+
+function journalPriorityScore(journal, priorityTerms) {
+  const normalized = normalizeJournalName(journal);
+  if (!normalized) return 0;
+  let score = 0;
+
+  if (normalized === "npj digital medicine") score = Math.max(score, 300);
+  if (isNatureFamilyJournal(normalized)) score = Math.max(score, 250);
+
+  for (const [index, term] of priorityTerms.entries()) {
+    const priorityName = normalizeJournalName(term);
+    if (!priorityName) continue;
+    const baseScore = 220 - index;
+    if (priorityName === "nature" && isNatureFamilyJournal(normalized)) {
+      score = Math.max(score, baseScore);
+    } else if (normalized === priorityName) {
+      score = Math.max(score, baseScore);
+    } else if (normalized.includes(priorityName) || priorityName.includes(normalized)) {
+      score = Math.max(score, baseScore - 40);
+    }
+  }
+
+  return score;
+}
+
+function isNatureFamilyJournal(normalizedJournal) {
+  return normalizedJournal === "nature" || normalizedJournal.startsWith("nature ");
 }
 
 function relevanceScore(item, tokens) {
@@ -741,6 +814,51 @@ function keywordTokens(query) {
   return cleanText(query).toLowerCase().split(/[\s,;，；、|/]+/).map((token) => token.trim()).filter((token) => token.length >= 2);
 }
 
+function parseRequiredKeywordGroups(value) {
+  return String(value || "")
+    .split(/[;\n]+/)
+    .map((group) => group.split(/[|,]+/).map(cleanText).filter(Boolean))
+    .filter((group) => group.length);
+}
+
+function parsePriorityJournalTerms(value) {
+  return String(value || "")
+    .split(/[,\n;]+/)
+    .map(cleanText)
+    .filter(Boolean);
+}
+
+function buildSearchQuery(query, requiredKeywordGroups) {
+  const missingRequiredTerms = requiredKeywordGroups
+    .filter((group) => !group.some((term) => textMatchesTerm(query, term)))
+    .map((group) => group[0])
+    .filter(Boolean);
+  return cleanText([query, ...missingRequiredTerms].join(" "));
+}
+
+function textMatchesTerm(text, term) {
+  const normalizedText = normalizeMatchText(text);
+  const normalizedTerm = normalizeMatchText(term);
+  if (!normalizedText || !normalizedTerm) return false;
+  if (/^[a-z0-9]+$/i.test(normalizedTerm)) {
+    return new RegExp(`\\b${escapeRegExp(normalizedTerm)}\\b`, "i").test(normalizedText);
+  }
+  return normalizedText.includes(normalizedTerm);
+}
+
+function normalizeMatchText(value) {
+  return cleanText(value)
+    .toLowerCase()
+    .replace(/[‐‑‒–—]/g, "-")
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function normalizeJournalName(value) {
   return cleanText(value)
     .toLowerCase()
@@ -835,6 +953,11 @@ function compareDateDesc(left, right) {
 function impactFactorSortValue(item) {
   const value = Number(item.impactFactor);
   return Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY;
+}
+
+function journalPrioritySortValue(item) {
+  const value = Number(item.journalPriority);
+  return Number.isFinite(value) ? value : 0;
 }
 
 function combineSourceNames(left, right) {
