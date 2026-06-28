@@ -9,9 +9,17 @@ const DEFAULTS = {
   timeZone: "America/New_York",
   excludePushed: true,
   autoJournalMetrics: true,
+  searchRouteName: "dental_implant_specific",
   requiredKeywordGroups:
     "surgery|surgical|operative|operation|procedure|intervention|intraoperative|perioperative|operating room|surgeon;agent|agents|agentic|AI agent|LLM agent|autonomous agent|multi-agent|multiagent|large language model|LLM",
   priorityJournals: "npj Digital Medicine,Nature"
+};
+
+const DEFAULT_SEARCH_ROUTES = {
+  ai_method_first: ["arXiv", "Semantic Scholar", "Google Scholar", "IEEE Xplore", "ACM DL"],
+  medical_validation_first: ["PubMed", "Embase", "Web of Science", "Scopus", "Cochrane Library"],
+  dental_implant_specific: ["PubMed", "Google Scholar", "Scopus", "Web of Science", "ScienceDirect", "SpringerLink"],
+  engineering_screw_planning: ["IEEE Xplore", "PubMed", "ScienceDirect", "SpringerLink", "Web of Science"]
 };
 
 async function main() {
@@ -53,6 +61,9 @@ function readConfig() {
     process.env.REQUIRED_KEYWORD_GROUPS || DEFAULTS.requiredKeywordGroups
   );
   const priorityJournalTerms = parsePriorityJournalTerms(process.env.PRIORITY_JOURNALS || DEFAULTS.priorityJournals);
+  const searchRoutes = parseSearchRoutes(process.env.SEARCH_ROUTES);
+  const searchRouteName = cleanText(process.env.SEARCH_ROUTE_NAME) || DEFAULTS.searchRouteName;
+  const searchSources = resolveSearchSources(searchRoutes, searchRouteName);
 
   if (!researchQuery) {
     throw new Error("Missing RESEARCH_QUERY.");
@@ -78,6 +89,10 @@ function readConfig() {
     impactFactorTable: String(process.env.IMPACT_FACTOR_TABLE || "").trim(),
     forcePush: process.env.FORCE_PUSH === "true",
     openAlexApiKey: cleanText(process.env.OPENALEX_API_KEY),
+    semanticScholarApiKey: cleanText(process.env.SEMANTIC_SCHOLAR_API_KEY),
+    searchRoutes,
+    searchRouteName,
+    searchSources,
     requiredKeywordGroups,
     strictRequiredKeywords: process.env.STRICT_REQUIRED_KEYWORDS !== "false",
     priorityJournalTerms
@@ -129,13 +144,7 @@ async function fetchWebRecommendations(config, pushedHistory) {
   const tokens = rankingTokens(config);
   const pushedKeys = new Set(config.excludePushed ? pushedHistory.map((entry) => entry.key).filter(Boolean) : []);
   const manualImpactFactors = parseImpactFactorTable(config.impactFactorTable);
-  const sourceResults = await Promise.all([
-    fetchSource("Crossref", () => fetchCrossrefRecommendations(config, tokens)),
-    fetchSource("OpenAlex", () => fetchOpenAlexRecommendations(config, tokens)),
-    fetchSource("PubMed", () => fetchPubMedRecommendations(config, tokens)),
-    fetchSource("Europe PMC", () => fetchEuropePmcRecommendations(config, tokens)),
-    fetchSource("arXiv", () => fetchArxivRecommendations(config, tokens))
-  ]);
+  const sourceResults = await Promise.all(config.searchSources.map((sourceName) => fetchRouteSource(sourceName, config, tokens)));
 
   const allItems = sourceResults.flatMap((result) => result.items);
   const merged = mergeRecommendations(allItems);
@@ -153,12 +162,45 @@ async function fetchWebRecommendations(config, pushedHistory) {
     source: result.label,
     error: result.error
   }));
+  const skippedSources = sourceResults.filter((result) => result.skipped).map((result) => ({
+    source: result.label,
+    reason: result.reason
+  }));
 
   return {
     items,
     sourceLabel: successfulSources.length ? `全网学术搜索：${successfulSources.join(", ")}` : "全网学术搜索",
-    sourceDetails: { successfulSources, failedSources }
+    sourceDetails: {
+      searchRouteName: config.searchRouteName,
+      requestedSources: config.searchSources,
+      successfulSources,
+      skippedSources,
+      failedSources
+    },
+    sourceLabel: successfulSources.length ? `Academic web search: ${successfulSources.join(", ")}` : "Academic web search"
   };
+}
+
+async function fetchRouteSource(sourceName, config, tokens) {
+  const label = cleanText(sourceName);
+  const normalized = normalizeRouteSourceName(label);
+  switch (normalized) {
+    case "arxiv":
+      return fetchSource("arXiv", () => fetchArxivRecommendations(config, tokens));
+    case "semantic scholar":
+      return fetchSource("Semantic Scholar", () => fetchSemanticScholarRecommendations(config, tokens));
+    case "pubmed":
+      return fetchSource("PubMed", () => fetchPubMedRecommendations(config, tokens));
+    case "crossref":
+      return fetchSource("Crossref", () => fetchCrossrefRecommendations(config, tokens));
+    case "openalex":
+      return fetchSource("OpenAlex", () => fetchOpenAlexRecommendations(config, tokens));
+    case "europe pmc":
+    case "europepmc":
+      return fetchSource("Europe PMC", () => fetchEuropePmcRecommendations(config, tokens));
+    default:
+      return skipSource(label, "No public GitHub Actions friendly API is configured for this database.");
+  }
 }
 
 async function fetchSource(label, task) {
@@ -169,6 +211,11 @@ async function fetchSource(label, task) {
     console.warn(`${label} failed: ${error.message || error}`);
     return { label, items: [], error: error.message || String(error) };
   }
+}
+
+function skipSource(label, reason) {
+  console.warn(`${label} skipped: ${reason}`);
+  return { label, items: [], skipped: true, reason };
 }
 
 async function fetchCrossrefRecommendations(config, tokens) {
@@ -255,6 +302,53 @@ function normalizeOpenAlexItem(item, query, tokens) {
     source: "OpenAlex",
     openAlexSourceId: source ? cleanText(source.id) : "",
     issnL: source ? cleanText(source.issn_l) : "",
+    relevanceScore: relevanceScore({ title, journal, abstract, publicationDate }, tokens)
+  };
+}
+
+async function fetchSemanticScholarRecommendations(config, tokens) {
+  const params = new URLSearchParams({
+    query: config.searchQuery,
+    limit: "80",
+    fields: "paperId,title,abstract,venue,year,publicationDate,citationCount,url,openAccessPdf,externalIds,publicationVenue"
+  });
+  const headers = { Accept: "application/json" };
+  if (config.semanticScholarApiKey) headers["x-api-key"] = config.semanticScholarApiKey;
+  const data = await fetchJson(`https://api.semanticscholar.org/graph/v1/paper/search?${params.toString()}`, headers);
+  const rawItems = Array.isArray(data.data) ? data.data : [];
+  const earliest = daysAgo(config.lookbackDays);
+  return rawItems
+    .map((item) => normalizeSemanticScholarItem(item, config.researchQuery, tokens))
+    .filter((item) => item.title)
+    .filter((item) => isWithinLookback(item.publicationDate, earliest));
+}
+
+function normalizeSemanticScholarItem(item, query, tokens) {
+  const title = cleanText(item.title);
+  const abstract = cleanText(item.abstract);
+  const doi = cleanDoi(item.externalIds?.DOI || "");
+  const journal = cleanText(item.publicationVenue?.name || item.venue || "");
+  const publicationDate = normalizeLooseDate(item.publicationDate || item.year || "");
+  const citationCount = typeof item.citationCount === "number" ? String(item.citationCount) : "";
+  const fullTextLink = firstNonEmpty([
+    item.openAccessPdf?.url,
+    item.url,
+    doi ? `https://doi.org/${doi}` : ""
+  ]);
+  const highlight = makeHighlight({ abstract, citationCount, source: "Semantic Scholar" }, query);
+
+  return {
+    recommendationId: doi || item.paperId || fullTextLink || title,
+    title,
+    journal,
+    doi,
+    publicationDate,
+    citationCount,
+    fullTextLink,
+    abstract,
+    highlight,
+    sourceUrl: fullTextLink,
+    source: "Semantic Scholar",
     relevanceScore: relevanceScore({ title, journal, abstract, publicationDate }, tokens)
   };
 }
@@ -591,8 +685,8 @@ function buildWeComMarkdown(config, batch) {
   return truncate(lines.join("\n"), 3900);
 }
 
-async function fetchJson(url) {
-  const response = await fetch(url, { headers: { Accept: "application/json" } });
+async function fetchJson(url, headers = {}) {
+  const response = await fetch(url, { headers: { Accept: "application/json", ...headers } });
   if (!response.ok) throw new Error(`${url} returned ${response.status}`);
   return response.json();
 }
@@ -814,6 +908,48 @@ function keywordTokens(query) {
   return cleanText(query).toLowerCase().split(/[\s,;，；、|/]+/).map((token) => token.trim()).filter((token) => token.length >= 2);
 }
 
+function parseSearchRoutes(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return DEFAULT_SEARCH_ROUTES;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`SEARCH_ROUTES must be valid JSON: ${error.message}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("SEARCH_ROUTES must be a JSON object whose values are database-name arrays.");
+  }
+  return normalizeSearchRoutes({ ...DEFAULT_SEARCH_ROUTES, ...parsed });
+}
+
+function normalizeSearchRoutes(routes) {
+  const normalized = {};
+  for (const [routeName, sources] of Object.entries(routes || {})) {
+    if (!Array.isArray(sources)) continue;
+    normalized[cleanText(routeName)] = uniqueValues(sources.map(cleanText).filter(Boolean));
+  }
+  return normalized;
+}
+
+function resolveSearchSources(routes, routeName) {
+  const normalizedName = cleanText(routeName);
+  const sources = routes[normalizedName];
+  if (!sources?.length) {
+    throw new Error(`Unknown SEARCH_ROUTE_NAME "${normalizedName}". Available routes: ${Object.keys(routes).join(", ")}`);
+  }
+  return sources;
+}
+
+function normalizeRouteSourceName(value) {
+  return cleanText(value)
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function parseRequiredKeywordGroups(value) {
   return String(value || "")
     .split(/[;\n]+/)
@@ -902,12 +1038,22 @@ function firstNonEmpty(values) {
   return values.map(cleanText).find(Boolean) || "";
 }
 
+function uniqueValues(values) {
+  return [...new Set(values.map(cleanText).filter(Boolean))];
+}
+
 function firstFiniteNumber(values) {
   for (const value of values) {
     const number = Number(value);
     if (Number.isFinite(number)) return number;
   }
   return null;
+}
+
+function isWithinLookback(value, earliestDate) {
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return true;
+  return time >= earliestDate.getTime();
 }
 
 function cleanDoi(value) {
