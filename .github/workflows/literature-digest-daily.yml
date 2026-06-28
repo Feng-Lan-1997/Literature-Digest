@@ -40,6 +40,9 @@ jobs:
         env:
           WECOM_WEBHOOK_URL: ${{ secrets.WECOM_WEBHOOK_URL }}
           RESEARCH_QUERY: ${{ vars.RESEARCH_QUERY || secrets.RESEARCH_QUERY }}
+          REQUIRED_KEYWORD_GROUPS: ${{ vars.REQUIRED_KEYWORD_GROUPS }}
+          STRICT_REQUIRED_KEYWORDS: ${{ vars.STRICT_REQUIRED_KEYWORDS || 'true' }}
+          PRIORITY_JOURNALS: ${{ vars.PRIORITY_JOURNALS }}
           OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
           IMPACT_FACTOR_TABLE: ${{ vars.IMPACT_FACTOR_TABLE || secrets.IMPACT_FACTOR_TABLE }}
           PUSH_TIME: ${{ vars.PUSH_TIME || '08:30' }}
@@ -50,9 +53,4 @@ jobs:
           AUTO_JOURNAL_METRICS: ${{ vars.AUTO_JOURNAL_METRICS || 'true' }}
           FORCE_PUSH: ${{ github.event_name == 'workflow_dispatch' && inputs.force && 'true' || 'false' }}
 
-      - name: Save pushed history
-        if: steps.push.outputs.did_push == 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: .literature-digest-state
-          key: literature-digest-state-${{ github.run_id }}
+      - name: Save pus
